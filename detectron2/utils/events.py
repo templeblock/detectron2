@@ -3,6 +3,7 @@ import datetime
 import json
 import logging
 import os
+import time
 from collections import defaultdict
 from contextlib import contextmanager
 import torch
@@ -13,13 +14,30 @@ _CURRENT_STORAGE_STACK = []
 
 
 def get_event_storage():
+    """
+    Returns:
+        The :class:`EventStorage` object that's currently being used.
+        Throws an error if no :class`EventStorage` is currently enabled.
+    """
     assert len(
         _CURRENT_STORAGE_STACK
     ), "get_event_storage() has to be called inside a 'with EventStorage(...)' context!"
     return _CURRENT_STORAGE_STACK[-1]
 
 
-class JSONWriter:
+class EventWriter:
+    """
+    Base class for writers that obtain events from :class:`EventStorage` and process them.
+    """
+
+    def write(self):
+        raise NotImplementedError
+
+    def close(self):
+        pass
+
+
+class JSONWriter(EventWriter):
     """
     Write scalars to a json file.
 
@@ -86,12 +104,11 @@ class JSONWriter:
         except AttributeError:
             pass
 
-    def __del__(self):
-        # not guaranteed to be called at exit, but probably fine
+    def close(self):
         self._file_handle.close()
 
 
-class TensorboardXWriter:
+class TensorboardXWriter(EventWriter):
     """
     Write all scalars to a tensorboard file.
     """
@@ -99,8 +116,9 @@ class TensorboardXWriter:
     def __init__(self, log_dir: str, window_size: int = 20, **kwargs):
         """
         Args:
-            log_dir (str): The directory to save the output events
+            log_dir (str): the directory to save the output events
             window_size (int): the scalars will be median-smoothed by this window size
+
             kwargs: other arguments passed to `torch.utils.tensorboard.SummaryWriter(...)`
         """
         self._window_size = window_size
@@ -113,14 +131,19 @@ class TensorboardXWriter:
         for k, v in storage.latest_with_smoothing_hint(self._window_size).items():
             self._writer.add_scalar(k, v, storage.iter)
 
-    def __del__(self):
+        if len(storage.vis_data) >= 1:
+            for img_name, img, step_num in storage.vis_data:
+                self._writer.add_image(img_name, img, step_num)
+            storage.clear_images()
+
+    def close(self):
         if hasattr(self, "_writer"):  # doesn't exist when the code fails at import
             self._writer.close()
 
 
-class CommonMetricPrinter:
+class CommonMetricPrinter(EventWriter):
     """
-    Print __common__ metrics to the terminal, including
+    Print **common** metrics to the terminal, including
     iteration time, ETA, memory, all losses, and the learning rate.
 
     To print something different, please implement a similar printer by yourself.
@@ -134,20 +157,35 @@ class CommonMetricPrinter:
         """
         self.logger = logging.getLogger(__name__)
         self._max_iter = max_iter
+        self._last_write = None
 
     def write(self):
         storage = get_event_storage()
         iteration = storage.iter
 
-        data_time, time = None, None
-        eta_string = "N/A"
         try:
             data_time = storage.history("data_time").avg(20)
-            time = storage.history("time").global_avg()
+        except KeyError:
+            # they may not exist in the first few iterations (due to warmup)
+            # or when SimpleTrainer is not used
+            data_time = None
+
+        eta_string = "N/A"
+        try:
+            iter_time = storage.history("time").global_avg()
             eta_seconds = storage.history("time").median(1000) * (self._max_iter - iteration)
+            storage.put_scalar("eta_seconds", eta_seconds, smoothing_hint=False)
             eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-        except KeyError:  # they may not exist in the first few iterations (due to warmup)
-            pass
+        except KeyError:
+            iter_time = None
+            # estimate eta on our own - more noisy
+            if self._last_write is not None:
+                estimate_iter_time = (time.perf_counter() - self._last_write[1]) / (
+                    iteration - self._last_write[0]
+                )
+                eta_seconds = estimate_iter_time * (self._max_iter - iteration)
+                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+            self._last_write = (iteration, time.perf_counter())
 
         try:
             lr = "{:.6f}".format(storage.history("lr").latest())
@@ -161,11 +199,7 @@ class CommonMetricPrinter:
 
         # NOTE: max_mem is parsed by grep in "dev/parse_results.sh"
         self.logger.info(
-            """\
-eta: {eta}  iter: {iter}  {losses}  \
-{time}  {data_time}  \
-lr: {lr}  {memory}\
-""".format(
+            " eta: {eta}  iter: {iter}  {losses}  {time}{data_time}lr: {lr}  {memory}".format(
                 eta=eta_string,
                 iter=iteration,
                 losses="  ".join(
@@ -175,8 +209,8 @@ lr: {lr}  {memory}\
                         if "loss" in k
                     ]
                 ),
-                time="time: {:.4f}".format(time) if time is not None else "",
-                data_time="data_time: {:.4f}".format(data_time) if data_time is not None else "",
+                time="time: {:.4f}  ".format(iter_time) if iter_time is not None else "",
+                data_time="data_time: {:.4f}  ".format(data_time) if data_time is not None else "",
                 lr=lr,
                 memory="max_mem: {:.0f}M".format(max_mem_mb) if max_mem_mb is not None else "",
             )
@@ -200,6 +234,28 @@ class EventStorage:
         self._latest_scalars = {}
         self._iter = start_iter
         self._current_prefix = ""
+        self._vis_data = []
+
+    def put_image(self, img_name, img_tensor):
+        """
+        Add an `img_tensor` to the `_vis_data` associated with `img_name`.
+
+        Args:
+            img_name (str): The name of the image to put into tensorboard.
+            img_tensor (torch.Tensor or numpy.array): An `uint8` or `float`
+                Tensor of shape `[channel, height, width]` where `channel` is
+                3. The image format should be RGB. The elements in img_tensor
+                can either have values in [0, 1] (float32) or [0, 255] (uint8).
+                The `img_tensor` will be visualized in tensorboard.
+        """
+        self._vis_data.append((img_name, img_tensor, self._iter))
+
+    def clear_images(self):
+        """
+        Delete all the stored images for visualization. This should be called
+        after images are written to tensorboard.
+        """
+        self._vis_data = []
 
     def put_scalar(self, name, value, smoothing_hint=True):
         """
@@ -294,6 +350,10 @@ class EventStorage:
         """
         self._iter += 1
         self._latest_scalars = {}
+
+    @property
+    def vis_data(self):
+        return self._vis_data
 
     @property
     def iter(self):

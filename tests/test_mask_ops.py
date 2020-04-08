@@ -101,11 +101,11 @@ class TestMaskCropPaste(unittest.TestCase):
         img_info = self.coco.loadImgs(ids=[ann["image_id"]])[0]
         height, width = img_info["height"], img_info["width"]
         gt_polygons = [np.array(p, dtype=np.float64) for p in ann["segmentation"]]
-        gt_bbox = BoxMode.convert(np.array(ann["bbox"]), BoxMode.XYWH_ABS, BoxMode.XYXY_ABS)
+        gt_bbox = BoxMode.convert(ann["bbox"], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS)
         gt_bit_mask = polygons_to_bitmask(gt_polygons, height, width)
 
         # Run rasterize ..
-        torch_gt_bbox = torch.from_numpy(gt_bbox[None, :]).to(dtype=torch.float32)
+        torch_gt_bbox = torch.tensor(gt_bbox).to(dtype=torch.float32).reshape(-1, 4)
         box_bitmasks = {
             "polygon": PolygonMasks([gt_polygons]).crop_and_resize(torch_gt_bbox, mask_side_len)[0],
             "gridsample": rasterize_polygons_with_grid_sample(gt_bit_mask, gt_bbox, mask_side_len),
@@ -125,7 +125,7 @@ class TestMaskCropPaste(unittest.TestCase):
                 padded_bitmask[0], scaled_boxes[0], height, width, threshold=0.5
             )
             r["aligned"] = paste_masks_in_image(
-                box_bitmask[None, :, :], Boxes(gt_bbox[None, :]), (height, width)
+                box_bitmask[None, :, :], Boxes(torch_gt_bbox), (height, width)
             )[0]
 
         table = []
@@ -135,6 +135,21 @@ class TestMaskCropPaste(unittest.TestCase):
                 iou = iou_between_full_image_bit_masks(gt_bit_mask.astype("uint8"), mask)
                 table.append((rasterize_method, paste_method, iou))
         return table
+
+    def test_polygon_area(self):
+        # Draw polygon boxes
+        for d in [5.0, 10.0, 1000.0]:
+            polygon = PolygonMasks([[[0, 0, 0, d, d, d, d, 0]]])
+            area = polygon.area()[0]
+            target = d ** 2
+            self.assertEqual(area, target)
+
+        # Draw polygon triangles
+        for d in [5.0, 10.0, 1000.0]:
+            polygon = PolygonMasks([[[0, 0, 0, d, d, d]]])
+            area = polygon.area()[0]
+            target = d ** 2 / 2
+            self.assertEqual(area, target)
 
 
 def benchmark_paste():

@@ -115,6 +115,10 @@ def find_top_rrpn_proposals(
     for n, image_size in enumerate(image_sizes):
         boxes = RotatedBoxes(topk_proposals[n])
         scores_per_img = topk_scores[n]
+        valid_mask = torch.isfinite(boxes.tensor).all(dim=1) & torch.isfinite(scores_per_img)
+        if not valid_mask.all():
+            boxes = boxes[valid_mask]
+            scores_per_img = scores_per_img[valid_mask]
         boxes.clip(image_size)
 
         # filter empty boxes
@@ -158,7 +162,7 @@ class RRPNOutputs(RPNOutputs):
         """
         Args:
             box2box_transform (Box2BoxTransformRotated): :class:`Box2BoxTransformRotated`
-                instance for anchor-proposal tranformations.
+                instance for anchor-proposal transformations.
             anchor_matcher (Matcher): :class:`Matcher` instance for matching anchors to
                 ground-truth boxes; used to determine training labels.
             batch_size_per_image (int): number of proposals to sample when training

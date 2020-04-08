@@ -42,7 +42,7 @@ class TestNMSRotated(unittest.TestCase):
         scores = torch.rand(N)
         return boxes, scores
 
-    def test_bactched_nms_rotated_0_degree_cpu(self):
+    def test_batched_nms_rotated_0_degree_cpu(self):
         # torch.manual_seed(0)
         N = 2000
         num_classes = 50
@@ -65,8 +65,8 @@ class TestNMSRotated(unittest.TestCase):
             ), "rotated_boxes modified by batched_nms_rotated"
             assert torch.equal(keep, keep_ref), err_msg.format(iou)
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA unavailable")
-    def test_bactched_nms_rotated_0_degree_cuda(self):
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_batched_nms_rotated_0_degree_cuda(self):
         # torch.manual_seed(0)
         N = 2000
         num_classes = 50
@@ -137,7 +137,7 @@ class TestNMSRotated(unittest.TestCase):
             keep = nms_rotated(rotated_boxes, scores, iou)
             assert torch.equal(keep, keep_ref), err_msg.format(iou)
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA unavailable")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_nms_rotated_0_degree_cuda(self):
         N = 1000
         boxes, scores = self._create_tensors(N)

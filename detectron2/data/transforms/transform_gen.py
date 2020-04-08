@@ -14,6 +14,7 @@ from fvcore.transforms.transform import (
     NoOpTransform,
     Transform,
     TransformList,
+    VFlipTransform,
 )
 from PIL import Image
 
@@ -88,26 +89,22 @@ class TransformGen(metaclass=ABCMeta):
         "MyTransformGen(field1={self.field1}, field2={self.field2})"
         """
         try:
-            argspec = inspect.getargspec(self.__init__)
-            assert argspec.varargs is None, "The default __repr__ doesn't work for varargs!"
-            assert argspec.keywords is None, "The default __repr__ doesn't work for kwargs!"
-            fields = argspec.args[1:]
-            index_field_has_default = len(fields) - (
-                0 if argspec.defaults is None else len(argspec.defaults)
-            )
-
+            sig = inspect.signature(self.__init__)
             classname = type(self).__name__
             argstr = []
-            for idx, f in enumerate(fields):
-                assert hasattr(self, f), (
+            for name, param in sig.parameters.items():
+                assert (
+                    param.kind != param.VAR_POSITIONAL and param.kind != param.VAR_KEYWORD
+                ), "The default __repr__ doesn't support *args or **kwargs"
+                assert hasattr(self, name), (
                     "Attribute {} not found! "
-                    "Default __repr__ only works if attributes match the constructor.".format(f)
+                    "Default __repr__ only works if attributes match the constructor.".format(name)
                 )
-                attr = getattr(self, f)
-                if idx >= index_field_has_default:
-                    if attr is argspec.defaults[idx - index_field_has_default]:
-                        continue
-                argstr.append("{}={}".format(f, pprint.pformat(attr)))
+                attr = getattr(self, name)
+                default = param.default
+                if default is attr:
+                    continue
+                argstr.append("{}={}".format(name, pprint.pformat(attr)))
             return "{}({})".format(classname, ", ".join(argstr))
         except AssertionError:
             return super().__repr__()
@@ -117,31 +114,32 @@ class TransformGen(metaclass=ABCMeta):
 
 class RandomFlip(TransformGen):
     """
-    Flip the image horizontally with the given probability.
-
-    TODO Vertical flip to be implemented.
+    Flip the image horizontally or vertically with the given probability.
     """
 
-    def __init__(self, prob=0.5):
+    def __init__(self, prob=0.5, *, horizontal=True, vertical=False):
         """
         Args:
             prob (float): probability of flip.
+            horizontal (boolean): whether to apply horizontal flipping
+            vertical (boolean): whether to apply vertical flipping
         """
-        horiz, vert = True, False
-        # TODO implement vertical flip when we need it
         super().__init__()
 
-        if horiz and vert:
+        if horizontal and vertical:
             raise ValueError("Cannot do both horiz and vert. Please use two Flip instead.")
-        if not horiz and not vert:
+        if not horizontal and not vertical:
             raise ValueError("At least one of horiz or vert has to be True!")
         self._init(locals())
 
     def get_transform(self, img):
-        _, w = img.shape[:2]
+        h, w = img.shape[:2]
         do = self._rand_range() < self.prob
         if do:
-            return HFlipTransform(w)
+            if self.horizontal:
+                return HFlipTransform(w)
+            elif self.vertical:
+                return VFlipTransform(h)
         else:
             return NoOpTransform()
 
@@ -198,6 +196,8 @@ class ResizeShortestEdge(TransformGen):
             size = np.random.randint(self.short_edge_length[0], self.short_edge_length[1] + 1)
         else:
             size = np.random.choice(self.short_edge_length)
+        if size == 0:
+            return NoOpTransform()
 
         scale = size * 1.0 / min(h, w)
         if h < w:

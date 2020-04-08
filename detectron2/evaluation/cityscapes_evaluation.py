@@ -5,6 +5,7 @@ import os
 import tempfile
 from collections import OrderedDict
 import torch
+from fvcore.common.file_io import PathManager
 from PIL import Image
 
 from detectron2.data import MetadataCatalog
@@ -20,6 +21,7 @@ class CityscapesEvaluator(DatasetEvaluator):
     Note:
         * It does not work in multi-machine distributed training.
         * It contains a synchronization, therefore has to be used on all ranks.
+        * Only the main process runs evaluation.
     """
 
     def __init__(self, dataset_name):
@@ -77,16 +79,11 @@ class CityscapesEvaluator(DatasetEvaluator):
         comm.synchronize()
         if comm.get_rank() > 0:
             return
-        os.environ["CITYSCAPES_DATASET"] = os.path.abspath(
-            os.path.join(self._metadata.gt_dir, "..", "..")
-        )
-        # Load the Cityscapes eval script *after* setting the required env var,
-        # since the script reads CITYSCAPES_DATASET into global variables at load time.
         import cityscapesscripts.evaluation.evalInstanceLevelSemanticLabeling as cityscapes_eval
 
         self._logger.info("Evaluating results under {} ...".format(self._temp_dir))
 
-        # set some global states in cityscapes evaluation API, before evaluting
+        # set some global states in cityscapes evaluation API, before evaluating
         cityscapes_eval.args.predictionPath = os.path.abspath(self._temp_dir)
         cityscapes_eval.args.predictionWalk = None
         cityscapes_eval.args.JSONOutput = False
@@ -95,7 +92,8 @@ class CityscapesEvaluator(DatasetEvaluator):
 
         # These lines are adopted from
         # https://github.com/mcordts/cityscapesScripts/blob/master/cityscapesscripts/evaluation/evalInstanceLevelSemanticLabeling.py # noqa
-        groundTruthImgList = glob.glob(cityscapes_eval.args.groundTruthSearch)
+        gt_dir = PathManager.get_local_path(self._metadata.gt_dir)
+        groundTruthImgList = glob.glob(os.path.join(gt_dir, "*", "*_gtFine_instanceIds.png"))
         assert len(
             groundTruthImgList
         ), "Cannot find any ground truth images to use for evaluation. Searched for: {}".format(

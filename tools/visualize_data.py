@@ -1,9 +1,11 @@
+#!/usr/bin/env python
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
 import numpy as np
 import os
 from itertools import chain
 import cv2
+import tqdm
 from PIL import Image
 
 from detectron2.config import get_cfg
@@ -24,7 +26,7 @@ def setup(args):
 
 
 def parse_args(in_args=None):
-    parser = argparse.ArgumentParser(description="Visualizes Ground-truth Dataset")
+    parser = argparse.ArgumentParser(description="Visualize ground-truth data")
     parser.add_argument(
         "--source",
         choices=["annotation", "dataloader"],
@@ -44,9 +46,6 @@ def parse_args(in_args=None):
 
 
 if __name__ == "__main__":
-    """
-    General utility to visualize ground truth dataset.
-    """
     args = parse_args()
     logger = setup_logger()
     logger.info("Arguments: " + str(args))
@@ -92,7 +91,7 @@ if __name__ == "__main__":
         dicts = list(chain.from_iterable([DatasetCatalog.get(k) for k in cfg.DATASETS.TRAIN]))
         if cfg.MODEL.KEYPOINT_ON:
             dicts = filter_images_with_few_keypoints(dicts, 1)
-        for dic in dicts:
+        for dic in tqdm.tqdm(dicts):
             img = utils.read_image(dic["file_name"], "RGB")
             visualizer = Visualizer(img, metadata=metadata, scale=scale)
             vis = visualizer.draw_dataset_dict(dic)

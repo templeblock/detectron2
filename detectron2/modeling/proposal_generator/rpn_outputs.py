@@ -9,6 +9,7 @@ from fvcore.nn import smooth_l1_loss
 from detectron2.layers import batched_nms, cat
 from detectron2.structures import Boxes, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
+from detectron2.utils.memory import retry_if_cuda_oom
 
 from ..sampling import subsample_labels
 
@@ -85,7 +86,8 @@ def find_top_rpn_proposals(
 
     Returns:
         proposals (list[Instances]): list of N Instances. The i-th Instances
-            stores post_nms_topk object proposals for image i.
+            stores post_nms_topk object proposals for image i, sorted by their
+            objectness score in descending order.
     """
     image_sizes = images.image_sizes  # in (h, w) order
     num_images = len(image_sizes)
@@ -125,13 +127,23 @@ def find_top_rpn_proposals(
     for n, image_size in enumerate(image_sizes):
         boxes = Boxes(topk_proposals[n])
         scores_per_img = topk_scores[n]
+        lvl = level_ids
+
+        valid_mask = torch.isfinite(boxes.tensor).all(dim=1) & torch.isfinite(scores_per_img)
+        if not valid_mask.all():
+            if training:
+                raise FloatingPointError(
+                    "Predicted boxes or scores contain Inf/NaN. Training has diverged."
+                )
+            boxes = boxes[valid_mask]
+            scores_per_img = scores_per_img[valid_mask]
+            lvl = lvl[valid_mask]
         boxes.clip(image_size)
 
         # filter empty boxes
         keep = boxes.nonempty(threshold=min_box_side_len)
-        lvl = level_ids
         if keep.sum().item() != len(boxes):
-            boxes, scores_per_img, lvl = boxes[keep], scores_per_img[keep], level_ids[keep]
+            boxes, scores_per_img, lvl = boxes[keep], scores_per_img[keep], lvl[keep]
 
         keep = batched_nms(boxes.tensor, scores_per_img, lvl, nms_thresh)
         # In Detectron1, there was different behavior during training vs. testing.
@@ -141,7 +153,7 @@ def find_top_rpn_proposals(
         # As a result, the training behavior becomes batch-dependent,
         # and the configuration "POST_NMS_TOPK_TRAIN" end up relying on the batch size.
         # This bug is addressed in Detectron2 to make the behavior independent of batch size.
-        keep = keep[:post_nms_topk]
+        keep = keep[:post_nms_topk]  # keep is already sorted
 
         res = Instances(image_size)
         res.proposal_boxes = boxes[keep]
@@ -207,7 +219,7 @@ class RPNOutputs(object):
         """
         Args:
             box2box_transform (Box2BoxTransform): :class:`Box2BoxTransform` instance for
-                anchor-proposal tranformations.
+                anchor-proposal transformations.
             anchor_matcher (Matcher): :class:`Matcher` instance for matching anchors to
                 ground-truth boxes; used to determine training labels.
             batch_size_per_image (int): number of proposals to sample when training
@@ -264,8 +276,13 @@ class RPNOutputs(object):
             anchors_i: anchors for i-th image
             gt_boxes_i: ground-truth boxes for i-th image
             """
-            match_quality_matrix = pairwise_iou(gt_boxes_i, anchors_i)
-            matched_idxs, gt_objectness_logits_i = self.anchor_matcher(match_quality_matrix)
+            match_quality_matrix = retry_if_cuda_oom(pairwise_iou)(gt_boxes_i, anchors_i)
+            matched_idxs, gt_objectness_logits_i = retry_if_cuda_oom(self.anchor_matcher)(
+                match_quality_matrix
+            )
+            # Matching is memory-expensive and may result in CPU tensors. But the result is small
+            gt_objectness_logits_i = gt_objectness_logits_i.to(device=gt_boxes_i.device)
+            del match_quality_matrix
 
             if self.boundary_threshold >= 0:
                 # Discard anchors that go out of the boundaries of the image
@@ -300,7 +317,7 @@ class RPNOutputs(object):
 
         def resample(label):
             """
-            Randomly sample a subset of positive and negative examples by overwritting
+            Randomly sample a subset of positive and negative examples by overwriting
             the label vector to the ignore value (-1) for all elements that are not
             included in the sample.
             """

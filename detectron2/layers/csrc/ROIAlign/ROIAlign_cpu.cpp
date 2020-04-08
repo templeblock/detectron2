@@ -2,6 +2,8 @@
 #include <ATen/TensorUtils.h>
 #include "ROIAlign.h"
 
+namespace {
+
 // implementation taken from Caffe2
 template <typename T>
 struct PreCalc {
@@ -92,7 +94,7 @@ void pre_calc_for_bilinear_interpolate(
           T hy = 1. - ly, hx = 1. - lx;
           T w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
-          // save weights and indeces
+          // save weights and indices
           PreCalc<T> pc;
           pc.pos1 = y_low * width + x_low;
           pc.pos2 = y_low * width + x_high;
@@ -163,7 +165,7 @@ void ROIAlignForward(
         (sampling_ratio > 0) ? sampling_ratio : ceil(roi_width / pooled_width);
 
     // We do average (integral) pooling inside a bin
-    // When the grid is empty, output zeros.
+    // When the grid is empty, output zeros == 0/1, instead of NaN.
     const T count = std::max(roi_bin_grid_h * roi_bin_grid_w, 1); // e.g. = 4
 
     // we want to precalculate indices and weights shared by all channels,
@@ -391,6 +393,10 @@ void ROIAlignBackward(
   } // for
 } // ROIAlignBackward
 
+} // namespace
+
+namespace detectron2 {
+
 at::Tensor ROIAlign_forward_cpu(
     const at::Tensor& input,
     const at::Tensor& rois,
@@ -493,3 +499,5 @@ at::Tensor ROIAlign_backward_cpu(
   });
   return grad_input;
 }
+
+} // namespace detectron2

@@ -1,8 +1,9 @@
+#!/usr/bin/env python
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
 Detection Training Script.
 
-This scripts reads a given config file and runs the training.
+This scripts reads a given config file and runs the training or evaluation.
 It is an entry point that is made to train standard models in detectron2.
 
 In order to let one script support training of many models,
@@ -39,6 +40,14 @@ from detectron2.modeling import GeneralizedRCNNWithTTA
 
 
 class Trainer(DefaultTrainer):
+    """
+    We use the "DefaultTrainer" which contains pre-defined default logic for
+    standard training workflow. They may not work for you, especially if you
+    are working on a new research project. In that case you can use the cleaner
+    "SimpleTrainer", or write your own training loop. You can use
+    "tools/plain_train_net.py" as an example.
+    """
+
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         """
@@ -65,14 +74,14 @@ class Trainer(DefaultTrainer):
             evaluator_list.append(COCOEvaluator(dataset_name, cfg, True, output_folder))
         if evaluator_type == "coco_panoptic_seg":
             evaluator_list.append(COCOPanopticEvaluator(dataset_name, output_folder))
-        if evaluator_type == "cityscapes":
+        elif evaluator_type == "cityscapes":
             assert (
                 torch.cuda.device_count() >= comm.get_rank()
             ), "CityscapesEvaluator currently do not work with multiple machines."
             return CityscapesEvaluator(dataset_name)
-        if evaluator_type == "pascal_voc":
+        elif evaluator_type == "pascal_voc":
             return PascalVOCDetectionEvaluator(dataset_name)
-        if evaluator_type == "lvis":
+        elif evaluator_type == "lvis":
             return LVISEvaluator(dataset_name, cfg, True, output_folder)
         if len(evaluator_list) == 0:
             raise NotImplementedError(
@@ -80,7 +89,7 @@ class Trainer(DefaultTrainer):
                     dataset_name, evaluator_type
                 )
             )
-        if len(evaluator_list) == 1:
+        elif len(evaluator_list) == 1:
             return evaluator_list[0]
         return DatasetEvaluators(evaluator_list)
 
@@ -123,10 +132,10 @@ def main(args):
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
         res = Trainer.test(cfg, model)
-        if comm.is_main_process():
-            verify_results(cfg, res)
         if cfg.TEST.AUG.ENABLED:
             res.update(Trainer.test_with_TTA(cfg, model))
+        if comm.is_main_process():
+            verify_results(cfg, res)
         return res
 
     """
